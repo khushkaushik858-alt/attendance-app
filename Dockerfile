@@ -14,4 +14,6 @@ ENV PORT=8000
 EXPOSE 8000
 
 # Run uvicorn via Python module (bulletproof)
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENV PORT=8000
+EXPOSE 8000
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "${PORT}"]
