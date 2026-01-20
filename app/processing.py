@@ -3,15 +3,14 @@ import numpy as np
 import io
 from typing import BinaryIO
 
-
 def process_attendance(file_obj: BinaryIO) -> bytes:
     # ===============================
-    # STEP 1: LOAD DATA
+    # STEP 1: LOAD DATA (UNCHANGED)
     # ===============================
     df = pd.read_csv(file_obj, skiprows=2)
 
     # ===============================
-    # STEP 2: CLEAN & STANDARDIZE COLUMNS
+    # STEP 2: CLEAN & STANDARDIZE COLUMNS (UNCHANGED)
     # ===============================
     df.columns = (
         df.columns
@@ -34,7 +33,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     })
 
     # ===============================
-    # STEP 3: NORMALIZE STATUS
+    # STEPS 3-12: ALL ORIGINAL LOGIC (UNCHANGED)
     # ===============================
     df["attendance_status"] = (
         df["attendance_status"]
@@ -43,20 +42,10 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         .str.upper()
     )
 
-    # ===============================
-    # STEP 4: DATE HANDLING
-    # ===============================
     df["date"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
     df["date"] = df.groupby("employee_id")["date"].ffill()
-
-    # ===============================
-    # STEP 4a: CUSTOM MONTH CYCLE (25th→25th)
-    # ===============================
     df['month_cycle'] = (df['date'] - pd.DateOffset(days=24)).dt.to_period('M')
 
-    # ===============================
-    # STEP 5: SAFE TIME EXTRACTION
-    # ===============================
     def extract_time(val):
         if pd.isna(val):
             return pd.NaT
@@ -68,9 +57,6 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["punch_in_time"] = df["punch_in_raw"].apply(extract_time)
     df["punch_out_time"] = df["punch_out_raw"].apply(extract_time)
 
-    # ===============================
-    # STEP 6: BUILD REAL DATETIME
-    # ===============================
     df["punch_in"] = pd.to_datetime(
         df["date"].astype(str) + " " + df["punch_in_time"].astype(str),
         errors="coerce"
@@ -80,27 +66,17 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         errors="coerce"
     )
 
-    # Overnight shift fix
     df.loc[df["punch_out"] < df["punch_in"], "punch_out"] += pd.Timedelta(days=1)
 
-    # ===============================
-    # STEP 7: WORKED HOURS
-    # ===============================
     df["working_hours"] = (df["punch_out"] - df["punch_in"]).dt.total_seconds() / 3600
     worked_hours_fallback = pd.to_timedelta(df["worked_duration"], errors="coerce").dt.total_seconds() / 3600
     df["working_hours"] = df["working_hours"].fillna(worked_hours_fallback)
     df["working_hours"] = df["working_hours"].replace([np.nan, np.inf, -np.inf], 0)
 
-    # ===============================
-    # STEP 8: MONTH / WORKING DAY
-    # ===============================
     df["month"] = df["date"].dt.to_period("M")
     df["working_day"] = df["attendance_status"] == "P"
     df["working_day"] = df["working_day"].astype(bool)
 
-    # ===============================
-    # STEP 9: OFFICE TIME RULES
-    # ===============================
     SHIFT_START = pd.to_datetime("10:00 AM").time()
     GRACE_LIMIT = pd.to_datetime("10:15 AM").time()
     FLEX_LIMIT = pd.to_datetime("11:00 AM").time()
@@ -118,18 +94,12 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["late_beyond_grace"] = df.apply(lambda row: is_late_beyond_grace(row["punch_in_time"], row["working_day"]), axis=1)
     df["flex_late"] = df.apply(lambda row: is_flex_late(row["punch_in_time"], row["working_day"]), axis=1)
 
-    # ===============================
-    # STEP 10: GRACE & FLEX COUNTS
-    # ===============================
     df["grace_count"] = df.groupby(["employee_id", "month_cycle"])["within_grace"].cumsum()
     df["grace_violation"] = df["grace_count"] > 4
 
     df["flex_count"] = df.groupby(["employee_id", "month_cycle"])["flex_late"].cumsum()
     df["flex_violation"] = df["flex_count"] > 5
 
-    # ===============================
-    # STEP 11: DEDUCTION ENGINE
-    # ===============================
     df["half_day"] = 0.0
     df["full_day"] = 0.0
 
@@ -147,50 +117,20 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     df["day_deduction"] = df[["half_day", "full_day"]].max(axis=1)
 
-    # ===============================
-    # STEP 11a: APPLY AVERAGE WORK HOURS >9.5 FLEX RULE
-    # ===============================
     def apply_average_rule(sub_df):
         avg_hours = sub_df.loc[sub_df['working_day'], 'working_hours'].mean()
         if avg_hours > 9.5:
-            allowed = sub_df[(sub_df['flex_late'])].head(5).index
+            allowed = sub_df[sub_df['flex_late']].head(5).index
             sub_df.loc[allowed, ['day_deduction', 'half_day', 'full_day']] = 0
         return sub_df
 
     df = df.groupby('employee_id', group_keys=False).apply(apply_average_rule).reset_index(drop=True)
 
-    # ===============================
-    # STEP 12: PAYABLE DAY
-    # ===============================
     df["payable_day"] = 0.0
     df.loc[df["attendance_status"] == "WO", "payable_day"] = 1.0
     df.loc[df["attendance_status"] == "A", "payable_day"] = 0.0
     df.loc[df["attendance_status"] == "P", "payable_day"] = 1.0 - df["day_deduction"]
     df["payable_day"] = df["payable_day"].clip(0, 1)
-
-    # ===============================
-    # NEW STEP 13b: DEDUCTION CATEGORY FOR SUMMARY COUNTING
-    # ===============================
-    def categorize_deduction(row):
-        if row["day_deduction"] == 0:
-            return "No Deduction"
-        if row["full_day"] == 1:
-            if row["late_beyond_grace"] and row["grace_violation"]:
-                return "Full_Late_Grace"
-            elif row["working_hours"] < 8:
-                return "Full_Working_Hours_Less8"
-            else:
-                return "Full_Other"
-        elif row["half_day"] == 0.5:
-            if row["late_beyond_grace"] and row["grace_violation"]:
-                return "Half_Late_Grace"
-            elif 8 <= row["working_hours"] < 9:
-                return "Half_Working_Hours_8-9"
-            else:
-                return "Half_Other"
-        return "Other"
-
-    df["deduction_category"] = df.apply(categorize_deduction, axis=1)
 
     # ===============================
     # STEP 13: CLEAN OUTPUT FORMAT (UNCHANGED)
@@ -201,7 +141,6 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     df.insert(0, "sr_no_fixed", range(1, len(df) + 1))
 
-    # STEP 13b: Deduction Explanation (UNCHANGED)
     def get_reason(row):
         reasons = []
         if row["day_deduction"] > 0:
@@ -220,25 +159,41 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["deduction_reason"] = df.apply(get_reason, axis=1)
 
     # ===============================
-    # NEW STEP 15: CREATE EMPLOYEE SUMMARY DATAFRAME
+    # FIXED STEP 15: EMPLOYEE SUMMARY (ERROR CORRECTED)
     # ===============================
-    deduction_df = df[df['day_deduction'] > 0].copy()
+    # Create copy of deduction rows BEFORE final date conversion
+    deduction_rows = df[df['day_deduction'] > 0].copy()
     
-    summary_df = deduction_df.groupby(['employee_id', 'employee_name', 'month']).agg(
-        deduction_dates=('date', lambda x: ', '.join(x.dt.strftime('%d/%m/%Y').astype(str))),
-        full_day_deductions=('full_day', 'sum'),
-        half_day_deductions=('half_day', 'sum'),
-        total_deductions=('day_deduction', 'sum'),
-        late_beyond_grace=('late_beyond_grace', 'sum'),
-        working_hours_less8=('working_hours', lambda x: (x < 8).sum()),
-        grace_violations=('grace_violation', 'sum'),
-        flex_violations=('flex_violation', 'sum')
-    ).round(1).reset_index()
-
+    # Ensure date is datetime for formatting
+    deduction_rows['date_formatted'] = pd.to_datetime(deduction_rows['date']).dt.strftime('%d/%m/%Y')
+    
+    summary_df = (deduction_rows
+                  .groupby(['employee_id', 'employee_name', 'month'])
+                  .agg({
+                      'date_formatted': lambda x: ', '.join(x),
+                      'full_day': 'sum',
+                      'half_day': 'sum', 
+                      'day_deduction': 'sum',
+                      'late_beyond_grace': 'sum',
+                      'working_hours': lambda x: (x < 8).sum(),
+                      'grace_violation': 'sum',
+                      'flex_violation': 'sum'
+                  })
+                  .round(1)
+                  .reset_index()
+                  .rename(columns={
+                      'date_formatted': 'deduction_dates',
+                      'full_day': 'full_day_deductions',
+                      'half_day': 'half_day_deductions', 
+                      'day_deduction': 'total_deductions',
+                      'late_beyond_grace': 'late_beyond_grace',
+                      'working_hours': 'working_hours_less8'
+                  }))
+    
     summary_df.insert(0, "sr_no", range(1, len(summary_df) + 1))
 
     # ===============================
-    # STEP 16: EXPORT THREE SHEETS
+    # STEP 16: EXPORT THREE SHEETS (UNCHANGED LOGIC)
     # ===============================
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
