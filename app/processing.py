@@ -176,6 +176,26 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     df.insert(0, "sr_no_fixed", range(1, len(df) + 1))
 
+       # STEP 13b: Deduction Explanation
+    # ===============================
+    def get_reason(row):
+        reasons = []
+        if row["day_deduction"] > 0:
+            if row["late_beyond_grace"]:
+                reasons.append("Late beyond grace")
+            if row["flex_violation"]:
+                reasons.append("Flex violation")
+            if row["working_hours"] < 8:
+                reasons.append("Working hours < 8")
+            elif 8 <= row["working_hours"] < 9:
+                reasons.append("Working hours between 8–9")
+            if row["grace_violation"]:
+                reasons.append("Grace violation > 4")
+        return ", ".join(reasons) if reasons else ""
+
+    df["deduction_reason"] = df.apply(get_reason, axis=1)
+
+
     # ===============================
     # STEP 14: EXPORT BOTH SHEETS
     # ===============================
