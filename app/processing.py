@@ -1,10 +1,9 @@
-# app/processing.py
 import pandas as pd
 import numpy as np
-import tempfile
+import io
 from typing import BinaryIO
 
-def process_attendance(file_obj: BinaryIO) -> str:
+def process_attendance(file_obj: BinaryIO) -> bytes:
     # ===============================
     # STEP 1: LOAD DATA
     # ===============================
@@ -87,7 +86,6 @@ def process_attendance(file_obj: BinaryIO) -> str:
     # STEP 7: WORKED HOURS
     # ===============================
     df["working_hours"] = (df["punch_out"] - df["punch_in"]).dt.total_seconds() / 3600
-
     worked_hours_fallback = pd.to_timedelta(df["worked_duration"], errors="coerce").dt.total_seconds() / 3600
     df["working_hours"] = df["working_hours"].fillna(worked_hours_fallback)
     df["working_hours"] = df["working_hours"].replace([np.nan, np.inf, -np.inf], 0)
@@ -181,11 +179,10 @@ def process_attendance(file_obj: BinaryIO) -> str:
     # ===============================
     # STEP 14: EXPORT BOTH SHEETS
     # ===============================
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    output_file = tmp.name
-
-    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Full_Attendance', index=False)
         df[df['day_deduction'] > 0].to_excel(writer, sheet_name='With_Deductions', index=False)
 
-    return output_file
+    output.seek(0)
+    return output.getvalue()
