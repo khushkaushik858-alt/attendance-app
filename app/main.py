@@ -1,6 +1,7 @@
 import os
+import io
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from app.processing import process_attendance
@@ -16,7 +17,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "message": None})
 
-@app.post("/upload", response_class=HTMLResponse)
+@app.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(...)):
     # **Label:** Validate file type
     if not file.filename.lower().endswith(".csv"):
@@ -26,27 +27,19 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
         })
 
     try:
-        # **Label:** Process attendance
-        output_path = process_attendance(file.file)
+        # **Label:** Process attendance (returns Excel bytes)
+        content = process_attendance(file.file)
 
-        # **Label:** Provide download link
-        filename = os.path.basename(output_path)
-        download_url = f"/download?path={output_path}&name=attendance_final.xlsx"
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "message": "File processed successfully.",
-            "download_url": download_url
-        })
+        # **Label:** Stream file back to client
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": "attachment; filename=attendance_final.xlsx"
+            }
+        )
     except Exception as e:
         return templates.TemplateResponse("index.html", {
             "request": request,
             "message": f"Error: {str(e)}"
         })
-
-@app.get("/download")
-async def download(path: str, name: str = "attendance_final.xlsx"):
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path, filename=name, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
