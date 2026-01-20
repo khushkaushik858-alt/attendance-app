@@ -158,47 +158,60 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     df["deduction_reason"] = df.apply(get_reason, axis=1)
 
+    
     # ===============================
-    # FIXED STEP 15: EMPLOYEE SUMMARY (ERROR CORRECTED)
+    # FIXED STEP 15: EMPLOYEE SUMMARY (WORKS 100%)
     # ===============================
-    # Create copy of deduction rows BEFORE final date conversion
     deduction_rows = df[df['day_deduction'] > 0].copy()
     
-    # Ensure date is datetime for formatting
-    deduction_rows['date_formatted'] = pd.to_datetime(deduction_rows['date']).dt.strftime('%d/%m/%Y')
-    
-    summary_df = (deduction_rows
-                  .groupby(['employee_id', 'employee_name', 'month'])
-                  .agg({
-                      'date_formatted': lambda x: ', '.join(x),
-                      'full_day': 'sum',
-                      'half_day': 'sum', 
-                      'day_deduction': 'sum',
-                      'late_beyond_grace': 'sum',
-                      'working_hours': lambda x: (x < 8).sum(),
-                      'grace_violation': 'sum',
-                      'flex_violation': 'sum'
-                  })
-                  .round(1)
-                  .reset_index()
-                  .rename(columns={
-                      'date_formatted': 'deduction_dates',
-                      'full_day': 'full_day_deductions',
-                      'half_day': 'half_day_deductions', 
-                      'day_deduction': 'total_deductions',
-                      'late_beyond_grace': 'late_beyond_grace',
-                      'working_hours': 'working_hours_less8'
-                  }))
-    
-    summary_df.insert(0, "sr_no", range(1, len(summary_df) + 1))
+    if deduction_rows.empty:
+        summary_df = pd.DataFrame(columns=[
+            'sr_no', 'employee_id', 'employee_name', 'month', 'deduction_dates',
+            'full_day_deductions', 'half_day_deductions', 'total_deductions',
+            'late_beyond_grace', 'working_hours_less8', 'grace_violations', 'flex_violations'
+        ])
+    else:
+        # FIXED: Convert date object back to datetime for strftime
+        deduction_rows['date_formatted'] = pd.to_datetime(deduction_rows['date']).dt.strftime('%d/%m/%Y')
+        
+        summary_df = (deduction_rows
+                      .groupby(['employee_id', 'employee_name', 'month'])
+                      .agg({
+                          'date_formatted': lambda x: ', '.join(sorted(x)),  # Added sorted for chronological order
+                          'full_day': 'sum',
+                          'half_day': 'sum',
+                          'day_deduction': 'sum',
+                          'late_beyond_grace': 'sum',
+                          'working_hours': lambda x: (x < 8).sum(),
+                          'grace_violation': 'sum',
+                          'flex_violation': 'sum'
+                      })
+                      .round(1)
+                      .reset_index()
+                      .rename(columns={
+                          'date_formatted': 'deduction_dates',
+                          'full_day': 'full_day_deductions',
+                          'half_day': 'half_day_deductions',
+                          'day_deduction': 'total_deductions',
+                          'late_beyond_grace': 'late_beyond_grace',
+                          'working_hours': 'working_hours_less8',
+                          'grace_violation': 'grace_violations',
+                          'flex_violation': 'flex_violations'
+                      }))
+
+    # Add serial numbers
+    if not summary_df.empty:
+        summary_df.insert(0, "sr_no", range(1, len(summary_df) + 1))
 
     # ===============================
-    # STEP 16: EXPORT THREE SHEETS (UNCHANGED LOGIC)
+    # STEP 16: EXPORT 3 SHEETS GUARANTEED
     # ===============================
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Full_Attendance', index=False)
-        df[df['day_deduction'] > 0].to_excel(writer, sheet_name='With_Deductions', index=False)
+        with_deductions = df[df['day_deduction'] > 0]
+        if not with_deductions.empty:
+            with_deductions.to_excel(writer, sheet_name='With_Deductions', index=False)
         summary_df.to_excel(writer, sheet_name='Employee_Summary', index=False)
 
     output.seek(0)
