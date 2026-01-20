@@ -3,6 +3,7 @@ import numpy as np
 import io
 from typing import BinaryIO
 
+
 def process_attendance(file_obj: BinaryIO) -> bytes:
     # ===============================
     # STEP 1: LOAD DATA
@@ -168,7 +169,31 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["payable_day"] = df["payable_day"].clip(0, 1)
 
     # ===============================
-    # STEP 13: CLEAN OUTPUT FORMAT
+    # NEW STEP 13b: DEDUCTION CATEGORY FOR SUMMARY COUNTING
+    # ===============================
+    def categorize_deduction(row):
+        if row["day_deduction"] == 0:
+            return "No Deduction"
+        if row["full_day"] == 1:
+            if row["late_beyond_grace"] and row["grace_violation"]:
+                return "Full_Late_Grace"
+            elif row["working_hours"] < 8:
+                return "Full_Working_Hours_Less8"
+            else:
+                return "Full_Other"
+        elif row["half_day"] == 0.5:
+            if row["late_beyond_grace"] and row["grace_violation"]:
+                return "Half_Late_Grace"
+            elif 8 <= row["working_hours"] < 9:
+                return "Half_Working_Hours_8-9"
+            else:
+                return "Half_Other"
+        return "Other"
+
+    df["deduction_category"] = df.apply(categorize_deduction, axis=1)
+
+    # ===============================
+    # STEP 13: CLEAN OUTPUT FORMAT (UNCHANGED)
     # ===============================
     df["date"] = df["date"].dt.date
     df["punch_in"] = df["punch_in"].fillna("").astype(str)
@@ -176,8 +201,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     df.insert(0, "sr_no_fixed", range(1, len(df) + 1))
 
-       # STEP 13b: Deduction Explanation
-    # ===============================
+    # STEP 13b: Deduction Explanation (UNCHANGED)
     def get_reason(row):
         reasons = []
         if row["day_deduction"] > 0:
@@ -195,14 +219,32 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     df["deduction_reason"] = df.apply(get_reason, axis=1)
 
+    # ===============================
+    # NEW STEP 15: CREATE EMPLOYEE SUMMARY DATAFRAME
+    # ===============================
+    deduction_df = df[df['day_deduction'] > 0].copy()
+    
+    summary_df = deduction_df.groupby(['employee_id', 'employee_name', 'month']).agg(
+        deduction_dates=('date', lambda x: ', '.join(x.dt.strftime('%d/%m/%Y').astype(str))),
+        full_day_deductions=('full_day', 'sum'),
+        half_day_deductions=('half_day', 'sum'),
+        total_deductions=('day_deduction', 'sum'),
+        late_beyond_grace=('late_beyond_grace', 'sum'),
+        working_hours_less8=('working_hours', lambda x: (x < 8).sum()),
+        grace_violations=('grace_violation', 'sum'),
+        flex_violations=('flex_violation', 'sum')
+    ).round(1).reset_index()
+
+    summary_df.insert(0, "sr_no", range(1, len(summary_df) + 1))
 
     # ===============================
-    # STEP 14: EXPORT BOTH SHEETS
+    # STEP 16: EXPORT THREE SHEETS
     # ===============================
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Full_Attendance', index=False)
         df[df['day_deduction'] > 0].to_excel(writer, sheet_name='With_Deductions', index=False)
+        summary_df.to_excel(writer, sheet_name='Employee_Summary', index=False)
 
     output.seek(0)
     return output.getvalue()
