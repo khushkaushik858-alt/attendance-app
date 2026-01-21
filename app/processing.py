@@ -5,12 +5,12 @@ from typing import BinaryIO
 
 def process_attendance(file_obj: BinaryIO) -> bytes:
     # ===============================
-    # STEP 1: LOAD DATA (UNCHANGED)
+    # STEP 1: LOAD DATA
     # ===============================
     df = pd.read_csv(file_obj, skiprows=2)
 
     # ===============================
-    # STEP 2: CLEAN & STANDARDIZE COLUMNS (UNCHANGED)
+    # STEP 2: CLEAN & STANDARDIZE COLUMNS
     # ===============================
     df.columns = (
         df.columns
@@ -33,7 +33,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     })
 
     # ===============================
-    # STEPS 3-12: ALL ORIGINAL LOGIC (UNCHANGED)
+    # STEP 3-12: CORE PROCESSING LOGIC (ONCE ONLY)
     # ===============================
     df["attendance_status"] = (
         df["attendance_status"]
@@ -133,7 +133,25 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["payable_day"] = df["payable_day"].clip(0, 1)
 
     # ===============================
-    # STEP 13: CLEAN OUTPUT FORMAT (UNCHANGED)
+    # STEP 13: 25th-TO-25th CYCLE VALIDATION (CRITICAL)
+    # ===============================
+    first_date = df['date'].min()
+    cycle_start_month = first_date.replace(day=25)
+    CYCLE_START = pd.to_datetime(cycle_start_month)
+    CYCLE_END = CYCLE_START + pd.Timedelta(days=24)
+
+    df_cycle = df[
+        (df['date'] >= CYCLE_START) & 
+        (df['date'] <= CYCLE_END)
+    ].copy()
+
+    print(f"25th-to-25th Cycle: {CYCLE_START.date()} to {CYCLE_END.date()}")
+    print(f"Cycle records: {len(df_cycle)}, Employees: {df_cycle['employee_id'].nunique()}")
+
+    df = df_cycle.reset_index(drop=True)
+
+    # ===============================
+    # STEP 14: CLEAN OUTPUT FORMAT
     # ===============================
     df["date"] = df["date"].dt.date
     df["punch_in"] = df["punch_in"].fillna("").astype(str)
@@ -158,53 +176,50 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     df["deduction_reason"] = df.apply(get_reason, axis=1)
 
-    
     # ===============================
-    # FIXED STEP 15: EMPLOYEE SUMMARY (WORKS 100%)
+    # STEP 15: EMPLOYEE SUMMARY (1 ROW PER EMPLOYEE)
     # ===============================
     deduction_rows = df[df['day_deduction'] > 0].copy()
-    
+
     if deduction_rows.empty:
         summary_df = pd.DataFrame(columns=[
-            'sr_no', 'employee_id', 'employee_name', 'month', 'deduction_dates',
-            'full_day_deductions', 'half_day_deductions', 'total_deductions',
-            'late_beyond_grace', 'working_hours_less8', 'grace_violations', 'flex_violations'
+            'sr_no', 'employee_id', 'employee_name', 'designation',
+            'deduction_dates',
+            'total_full_day_deductions', 'total_half_day_deductions', 'total_deductions',
+            'grace_violation_count', 'working_hours_less8_count', 'late_beyond_grace_count', 'flex_violation_count'
         ])
     else:
-        # FIXED: Convert date object back to datetime for strftime
-        deduction_rows['date_formatted'] = pd.to_datetime(deduction_rows['date']).dt.strftime('%d/%m/%Y')
+        deduction_rows['date_formatted'] = pd.to_datetime(deduction_rows['date'], errors='coerce').dt.strftime('%d/%m/%Y')
         
         summary_df = (deduction_rows
-                      .groupby(['employee_id', 'employee_name', 'month'])
+                      .groupby(['employee_id', 'employee_name', 'designation'])
                       .agg({
-                          'date_formatted': lambda x: ', '.join(sorted(x)),  # Added sorted for chronological order
+                          'date_formatted': lambda x: ', '.join(sorted(set(x.dropna()))),
                           'full_day': 'sum',
                           'half_day': 'sum',
                           'day_deduction': 'sum',
-                          'late_beyond_grace': 'sum',
-                          'working_hours': lambda x: (x < 8).sum(),
                           'grace_violation': 'sum',
+                          'working_hours': lambda x: (x < 8).sum(),
+                          'late_beyond_grace': 'sum',
                           'flex_violation': 'sum'
                       })
                       .round(1)
                       .reset_index()
                       .rename(columns={
                           'date_formatted': 'deduction_dates',
-                          'full_day': 'full_day_deductions',
-                          'half_day': 'half_day_deductions',
+                          'full_day': 'total_full_day_deductions',
+                          'half_day': 'total_half_day_deductions',
                           'day_deduction': 'total_deductions',
-                          'late_beyond_grace': 'late_beyond_grace',
-                          'working_hours': 'working_hours_less8',
-                          'grace_violation': 'grace_violations',
-                          'flex_violation': 'flex_violations'
+                          'grace_violation': 'grace_violation_count',
+                          'working_hours': 'working_hours_less8_count',
+                          'late_beyond_grace': 'late_beyond_grace_count',
+                          'flex_violation': 'flex_violation_count'
                       }))
 
-    # Add serial numbers
-    if not summary_df.empty:
         summary_df.insert(0, "sr_no", range(1, len(summary_df) + 1))
 
     # ===============================
-    # STEP 16: EXPORT 3 SHEETS GUARANTEED
+    # STEP 16: EXPORT 3 SHEETS
     # ===============================
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
