@@ -1,3 +1,4 @@
+
 import pandas as pd
 import numpy as np
 import io
@@ -72,7 +73,6 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     # STEP 9: OFFICE TIME RULES
     SHIFT_START = pd.to_datetime("10:00 AM").time()
     GRACE_LIMIT = pd.to_datetime("10:15 AM").time()
-    FLEX_LIMIT = pd.to_datetime("11:00 AM").time()
 
     def is_within_grace(punch, working_day):
         return bool(working_day and punch and SHIFT_START < punch <= GRACE_LIMIT)
@@ -80,18 +80,12 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     def is_late_beyond_grace(punch, working_day):
         return bool(working_day and punch and punch > GRACE_LIMIT)
 
-    def is_flex_late(punch, working_day):
-        return bool(working_day and punch and GRACE_LIMIT < punch <= FLEX_LIMIT)
-
     df["within_grace"] = df.apply(lambda r: is_within_grace(r["punch_in_time"], r["working_day"]), axis=1)
     df["late_beyond_grace"] = df.apply(lambda r: is_late_beyond_grace(r["punch_in_time"], r["working_day"]), axis=1)
-    df["flex_late"] = df.apply(lambda r: is_flex_late(r["punch_in_time"], r["working_day"]), axis=1)
 
-    # STEP 10: GRACE & FLEX COUNTS
+    # STEP 10: GRACE COUNTS
     df["grace_count"] = df.groupby(["employee_id", "month"])["within_grace"].cumsum()
     df["grace_violation"] = df["grace_count"] > 4
-    df["flex_count"] = df.groupby(["employee_id", "month"])["flex_late"].cumsum()
-    df["flex_violation"] = df["flex_count"] > 5
 
     # STEP 11: DEDUCTION ENGINE (sequential logic)
     def calculate_deduction(row):
@@ -110,22 +104,15 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         if row["late_beyond_grace"] and row["grace_violation"]:
             if row["working_hours"] < 9:
                 return 1.0
-            elif (not row["flex_late"]) or row["flex_violation"]:
+            else:
                 return max(base_deduction, 0.5)
 
         return base_deduction
 
     df["day_deduction"] = df.apply(calculate_deduction, axis=1)
 
-    # STEP 11a: Average rule override
-    def apply_average_rule(sub_df):
-        avg_hours = sub_df.loc[sub_df['working_day'], 'working_hours'].mean()
-        if avg_hours > 9.5:
-            allowed = sub_df[sub_df['flex_late']].head(5).index
-            sub_df.loc[allowed, 'day_deduction'] = 0.0
-        return sub_df
-
-    df = df.groupby('employee_id', group_keys=False).apply(apply_average_rule).reset_index(drop=True)
+    # STEP 11a: Average rule override (removed flex logic)
+    # No flex privilege logic for now
 
     # STEP 12: PAYABLE DAY
     df["payable_day"] = 0.0
@@ -145,8 +132,6 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         if row["day_deduction"] > 0:
             if row["late_beyond_grace"]:
                 reasons.append("Late beyond grace")
-            if row["flex_violation"]:
-                reasons.append("Flex violation")
             if row["working_hours"] < 8:
                 reasons.append("Working hours < 8")
             elif 8 <= row["working_hours"] < 9:
@@ -167,7 +152,8 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
             'sr_no', 'employee_id', 'employee_name', 'designation',
             'deduction_dates',
             'total_full_day_deductions', 'total_half_day_deductions', 'total_deductions',
-            'grace_violation_count', 'working_hours_less8_count', 'late_beyond_grace_count', 'flex_violation_count'
+            'grace_violation_count', 'working_hours_less8_count',
+            'late_beyond_grace_count', 'working_hours_between8to9_count'
         ])
     else:
         deduction_rows['date_formatted'] = pd.to_datetime(
@@ -183,25 +169,31 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
                 'half_day': 'sum',
                 'day_deduction': 'sum',
                 'grace_violation': 'sum',
-                'working_hours': lambda x: (x < 8).sum(),
-                'late_beyond_grace': 'sum',
-                'flex_violation': 'sum'
+                'working_hours': [
+                    lambda x: (x < 8).sum(),              # count <8 hours
+                    lambda x: ((x >= 8) & (x < 9)).sum()  # count between 8–9 hours
+                ],
+                'late_beyond_grace': 'sum'
             })
             .round(1)
             .reset_index()
-            .rename(columns={
-                'date_formatted': 'deduction_dates',
-                'full_day': 'total_full_day_deductions',
-                'half_day': 'total_half_day_deductions',
-                'day_deduction': 'total_deductions',
-                'grace_violation': 'grace_violation_count',
-                'working_hours': 'working_hours_less8_count',
-                'late_beyond_grace': 'late_beyond_grace_count',
-                'flex_violation': 'flex_violation_count'
-            })
         )
 
+        # Flatten MultiIndex columns created by multiple lambdas
+        summary_df.columns = [
+            'employee_id', 'employee_name', 'designation',
+            'deduction_dates',
+            'total_full_day_deductions',
+            'total_half_day_deductions',
+            'total_deductions',
+            'grace_violation_count',
+            'working_hours_less8_count',
+            'working_hours_between8to9_count',
+            'late_beyond_grace_count'
+        ]
+
         summary_df.insert(0, "sr_no", range(1, len(summary_df) + 1))
+
     # STEP 15: EXPORT TO EXCEL
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -213,5 +205,4 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
     output.seek(0)
     return output.getvalue()
-
 
