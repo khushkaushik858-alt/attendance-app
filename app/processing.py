@@ -92,8 +92,13 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["grace_count"] = df.groupby(["employee_id", "month"])["within_grace"].cumsum()
     df["grace_violation"] = df["grace_count"] > 4
 
-    # STEP 11a: Flex eligibility based on average hours
-    avg_hours = df.groupby("employee_id")["working_hours"].transform("mean")
+   
+       # STEP 11a: Flex eligibility based on average hours (only working days)
+    avg_hours = (
+        df[df["working_day"]]
+        .groupby("employee_id")["working_hours"]
+        .transform("mean")
+    )
     df["flex_eligible"] = avg_hours >= 9.5
 
     # STEP 11: DEDUCTION ENGINE (sequential logic with flex)
@@ -166,7 +171,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["full_day"] = (df["day_deduction"] == 1.0).astype(float)
     df["half_day"] = (df["day_deduction"] == 0.5).astype(float)
 
-           # STEP 14: EMPLOYEE SUMMARY
+              # STEP 14: EMPLOYEE SUMMARY
     deduction_rows = df[df['day_deduction'] > 0].copy()
     if deduction_rows.empty:
         summary_df = pd.DataFrame(columns=[
@@ -183,7 +188,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         ).dt.strftime('%d/%m/%Y')
 
         # Calculate average working hours only for actual working days
-        avg_hours = (
+        avg_hours_summary = (
             df[df["working_day"]]
             .groupby("employee_id")["working_hours"]
             .mean()
@@ -224,7 +229,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
         # Merge in average working hours per employee (only working days)
         summary_df = summary_df.merge(
-            avg_hours.rename("avg_working_hours"),
+            avg_hours_summary.rename("avg_working_hours"),
             on="employee_id",
             how="left"
         )
