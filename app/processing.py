@@ -73,6 +73,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     # STEP 9: OFFICE TIME RULES
     SHIFT_START = pd.to_datetime("10:00 AM").time()
     GRACE_LIMIT = pd.to_datetime("10:15 AM").time()
+    FLEX_LIMIT = pd.to_datetime("11:00 AM").time()
 
     def is_within_grace(punch, working_day):
         return bool(working_day and punch and SHIFT_START < punch <= GRACE_LIMIT)
@@ -80,14 +81,22 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     def is_late_beyond_grace(punch, working_day):
         return bool(working_day and punch and punch > GRACE_LIMIT)
 
+    def is_within_flex(punch, working_day):
+        return bool(working_day and punch and GRACE_LIMIT < punch <= FLEX_LIMIT)
+
     df["within_grace"] = df.apply(lambda r: is_within_grace(r["punch_in_time"], r["working_day"]), axis=1)
     df["late_beyond_grace"] = df.apply(lambda r: is_late_beyond_grace(r["punch_in_time"], r["working_day"]), axis=1)
+    df["within_flex"] = df.apply(lambda r: is_within_flex(r["punch_in_time"], r["working_day"]), axis=1)
 
     # STEP 10: GRACE COUNTS
     df["grace_count"] = df.groupby(["employee_id", "month"])["within_grace"].cumsum()
     df["grace_violation"] = df["grace_count"] > 4
 
-    # STEP 11: DEDUCTION ENGINE (sequential logic)
+    # STEP 11a: Flex eligibility based on average hours
+    avg_hours = df.groupby("employee_id")["working_hours"].transform("mean")
+    df["flex_eligible"] = avg_hours >= 9.5
+
+    # STEP 11: DEDUCTION ENGINE (sequential logic with flex)
     def calculate_deduction(row):
         if not row["working_day"]:
             return 0.0
@@ -100,7 +109,20 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         else:
             base_deduction = 0.0
 
-        # Grace violation adds stricter rules
+        # Grace first
+        if row["within_grace"]:
+            if not row["grace_violation"]:
+                return base_deduction
+            elif row["flex_eligible"] and row["within_flex"]:
+                return base_deduction
+            else:
+                return max(base_deduction, 0.5)
+
+        # Flex next
+        if row["within_flex"] and row["flex_eligible"]:
+            return base_deduction
+
+        # Late beyond grace
         if row["late_beyond_grace"] and row["grace_violation"]:
             if row["working_hours"] < 9:
                 return 1.0
@@ -110,9 +132,6 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         return base_deduction
 
     df["day_deduction"] = df.apply(calculate_deduction, axis=1)
-
-    # STEP 11a: Average rule override (removed flex logic)
-    # No flex privilege logic for now
 
     # STEP 12: PAYABLE DAY
     df["payable_day"] = 0.0
@@ -132,6 +151,8 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
         if row["day_deduction"] > 0:
             if row["late_beyond_grace"]:
                 reasons.append("Late beyond grace")
+            if row["within_flex"] and row["flex_eligible"]:
+                reasons.append("Flex applied")
             if row["working_hours"] < 8:
                 reasons.append("Working hours < 8")
             elif 8 <= row["working_hours"] < 9:
@@ -145,7 +166,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["full_day"] = (df["day_deduction"] == 1.0).astype(float)
     df["half_day"] = (df["day_deduction"] == 0.5).astype(float)
 
-    # STEP 14: EMPLOYEE SUMMARY
+       # STEP 14: EMPLOYEE SUMMARY
     deduction_rows = df[df['day_deduction'] > 0].copy()
     if deduction_rows.empty:
         summary_df = pd.DataFrame(columns=[
@@ -153,7 +174,8 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
             'deduction_dates',
             'total_full_day_deductions', 'total_half_day_deductions', 'total_deductions',
             'grace_violation_count', 'working_hours_less8_count',
-            'late_beyond_grace_count', 'working_hours_between8to9_count'
+            'working_hours_between8to9_count', 'late_beyond_grace_count',
+            'flex_eligible'
         ])
     else:
         deduction_rows['date_formatted'] = pd.to_datetime(
@@ -162,7 +184,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
         summary_df = (
             deduction_rows
-            .groupby(['employee_id', 'employee_name', 'designation'])
+            .groupby(['employee_id', 'employee_name', 'designation', 'flex_eligible'])
             .agg({
                 'date_formatted': lambda x: ', '.join(sorted(set(x.dropna()))),
                 'full_day': 'sum',
@@ -181,7 +203,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
 
         # Flatten MultiIndex columns created by multiple lambdas
         summary_df.columns = [
-            'employee_id', 'employee_name', 'designation',
+            'employee_id', 'employee_name', 'designation', 'flex_eligible',
             'deduction_dates',
             'total_full_day_deductions',
             'total_half_day_deductions',
