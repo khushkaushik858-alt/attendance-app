@@ -166,7 +166,7 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
     df["full_day"] = (df["day_deduction"] == 1.0).astype(float)
     df["half_day"] = (df["day_deduction"] == 0.5).astype(float)
 
-       # STEP 14: EMPLOYEE SUMMARY
+           # STEP 14: EMPLOYEE SUMMARY
     deduction_rows = df[df['day_deduction'] > 0].copy()
     if deduction_rows.empty:
         summary_df = pd.DataFrame(columns=[
@@ -175,12 +175,20 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
             'total_full_day_deductions', 'total_half_day_deductions', 'total_deductions',
             'grace_violation_count', 'working_hours_less8_count',
             'working_hours_between8to9_count', 'late_beyond_grace_count',
-            'flex_eligible'
+            'flex_eligible', 'avg_working_hours'
         ])
     else:
         deduction_rows['date_formatted'] = pd.to_datetime(
             deduction_rows['date'], errors='coerce'
         ).dt.strftime('%d/%m/%Y')
+
+        # Calculate average working hours only for actual working days
+        avg_hours = (
+            df[df["working_day"]]
+            .groupby("employee_id")["working_hours"]
+            .mean()
+            .round(1)
+        )
 
         summary_df = (
             deduction_rows
@@ -213,6 +221,13 @@ def process_attendance(file_obj: BinaryIO) -> bytes:
             'working_hours_between8to9_count',
             'late_beyond_grace_count'
         ]
+
+        # Merge in average working hours per employee (only working days)
+        summary_df = summary_df.merge(
+            avg_hours.rename("avg_working_hours"),
+            on="employee_id",
+            how="left"
+        )
 
         summary_df.insert(0, "sr_no", range(1, len(summary_df) + 1))
 
